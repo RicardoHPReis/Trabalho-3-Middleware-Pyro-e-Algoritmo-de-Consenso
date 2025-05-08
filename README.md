@@ -1,0 +1,5 @@
+# Trabalho 3 - Middleware Pyro e Algoritmo de Consenso #
+### Trabalho de Sistemas Distribuídos
+Em português:
+Este trabalho tem como objetivo de desenvolver uma aplicação distribuída que permita o compartilhamento de arquivos entre 5 processos pares (peer-to-peer - P2P). O sistema deve contar com um nó líder (tracker) responsável por manter um índice centralizado de todos os arquivos compartilhados. A comunicação entre os nós deve ser realizada utilizando o middleware PyRO (Python Remote Objects), baseado no padrão de mensagens requisição-resposta.\
+O projeto foi feito em conjunto com Beatriz Marcelino Fernandes e pertence à matéria de Sistemas Distribuídos, provido pela professora Ana Cristina Barreiras Kochem Vendramin do curso de Sistemas de Informação na UTFPR (Universidade Tecnológica Federal do Paraná).
