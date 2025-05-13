@@ -5,7 +5,7 @@ import os
 
 class P2P_2:
     def __init__(self):
-        self.fortune_file = r.sample(os.listdir("./arquivos"), 2)
+        self.fortune_file = r.sample(os.listdir("./shared"), 2)
         self.lider = False
         self.tempo = 0
         
@@ -23,5 +23,5 @@ uri = ns.lookup("p1")
 
 name = input("What is your name?\n")
 
-greeting_maker = p.Proxy(uri)
-print(greeting_maker.get_fortune(name))
+p1 = p.Proxy(uri)
+print(p1.get_fortune(name))

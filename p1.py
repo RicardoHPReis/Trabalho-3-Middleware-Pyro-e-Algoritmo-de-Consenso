@@ -5,7 +5,7 @@ import os
 
 class P2P_1:
     def __init__(self):
-        self.fortune_file = r.sample(os.listdir("./arquivos"), 2)
+        self.fortune_file = r.sample(os.listdir("./shared"), 2)
         self.lider = False
         self.tempo = 0
         
