@@ -17,81 +17,30 @@ class Peer:
         self.ENDERECO_HOST = ('localhost', 9999)
         
         self.is_tracker = is_tracker
-        
-        self.epoca = 0
         self.tracker_uri = None
+        self.epoca = 0
+        self.peers_conhecidos = []
+        self.index_arquivos = c.defaultdict(list)
+        
         self.election_timeout = None
         self.HEARTBEAT_INTERVALO = r.uniform(2.0, 3.0)
         self.ELEICAO_TIMEOUT = r.uniform(8.0, 10.0)
         self.VERIFICACAO_TRACKER = 10.0
         self.votos_recebidos = set()
         self.peer_votou = False
-        self.peers_conhecidos = []
         self.eleicao_em_curso = False
         self.epoca_registro_arquivos = -1
-        self.index_arquivos = c.defaultdict(list)
-        
-        self.criar_arquivos()
-        self.iniciar_servico()
-        self.registrar_no_sistema()
-        
-        self.verificador_tracker_thread = th.Thread(target=self.verificar_tracker_periodicamente, daemon=True)
-        self.verificador_tracker_thread.start()
 
 
-    def _log(self, message):
-        try:
-            with s.socket(s.AF_INET, s.SOCK_DGRAM) as sock:
-                sock.sendto(f"[Peer {self.peer_id}] {message}".encode(), self.ENDERECO_HOST)
-        except:
-            pass
-
-
-    def criar_arquivos(self):
-        os.makedirs(self.FILES_DIR, exist_ok=True)
-        for i in range(1, 3):
-            path = os.path.join(self.FILES_DIR, f"file_{self.peer_id}_{i}.txt")
-            if not os.path.exists(path):
-                with open(path, "w") as f:
-                    f.write(f"Conteúdo do peer {self.peer_id}, arquivo {i}\n")
-
-
-    def iniciar_servico(self):
-        self.daemon = Pyro5.api.Daemon(host="localhost", port=self.PORT)
-        self.uri = self.daemon.register(self)
-        th.Thread(target=self.daemon.requestLoop, daemon=True).start()
-        print(f"Peer {self.peer_id} iniciado na porta {self.PORT}")
-        
-        t.sleep(1)
-        
+    def __del__(self):
+        print("Encerrando peer...")
         if self.is_tracker:
-            self.heartbeat_thread = th.Thread(target=self.enviar_heartbeats)
-            self.heartbeat_thread.start()
-
-
-    def registrar_no_sistema(self):
-        try:
-            ns = Pyro5.api.locate_ns()
-            if self.is_tracker:
-                nome_tracker = f"Tracker_Epoca_{self.epoca}"
-                ns.register(nome_tracker, self.uri)
-                self._log(f"Tracker {self.peer_id} eleito para época {self.epoca}")
-                for file in os.listdir(self.FILES_DIR):
-                    self.registrar_arquivo(self.uri, file)
-                t.sleep(2)
-                ns.remove(f"Peer_{self.peer_id}")
-                self.peers_conhecidos = [
-                    uri for nome, uri in ns.list().items()
-                    if nome.startswith("Peer_")
-                ]
-                self.total_peers = len(self.peers_conhecidos)
-            else:
-                ns.register(f"Peer_{self.peer_id}", self.uri)
-                self.atualizar_tracker()
-                
-        except Exception as e:
-            self._log(f"Erro no registro: {e}")
-
+            try:
+                ns = Pyro5.api.locate_ns()
+                ns.remove(f"Tracker_Epoca_{self.epoca}")
+            except Exception as e:
+                pass
+        self.daemon.shutdown()
 
     @Pyro5.api.expose
     def get_peer_id(self):
@@ -101,6 +50,64 @@ class Peer:
     @Pyro5.api.expose
     def ping(self):
         return True
+    
+    
+    @Pyro5.api.expose
+    def registrar_arquivo(self, peer_uri, arquivo):
+        if self.is_tracker:
+            self.index_arquivos[arquivo].append(peer_uri)
+            self._log(f"Registrou {arquivo} de {peer_uri}")
+    
+            
+    @Pyro5.api.expose
+    def receber_heartbeat(self):
+        if self.election_timeout and not self.is_tracker:
+            self._log("Heartbeat recebido")
+            self.election_timeout.cancel()
+            self.iniciar_detector_falhas()
+    
+            
+    @Pyro5.api.expose
+    def votar(self, candidato_id, nova_epoca):
+        if not self.peer_votou:
+            self.peer_votou = True
+            self._log(f"Votou em {candidato_id} (época {self.epoca + 1})")
+            return True
+        #self._log(f"Recusou voto para época {self.epoca + 1}")
+        return False
+    
+    
+    @Pyro5.api.expose
+    def atualizar_epoca(self, nova_epoca, novo_tracker_uri):
+        if nova_epoca > self.epoca:
+            self.epoca = nova_epoca
+            self.peer_votou = False
+            self.tracker_uri = novo_tracker_uri
+            self._log(f"Atualizou para época {self.epoca}")
+            self.registrar_arquivos_no_tracker()
+            self.iniciar_detector_falhas()
+
+
+    @Pyro5.api.expose
+    def consultar_arquivo(self, nome_arquivo):
+        return self.index_arquivos[nome_arquivo] 
+
+
+    @Pyro5.api.expose
+    def baixar_arquivo(self, arquivo):
+        try:
+            path = os.path.join(self.FILES_DIR, arquivo)
+            self._log(f"Baixando arquivo {arquivo} de {self.peer_id} do caminho {path} - {os.path.exists(path)}")
+            if os.path.exists(path):
+                with open(path, "rb") as arq:
+                    data = arq.read()
+                    return data
+            else:
+                self._log(f"Arquivo {arquivo} não encontrado no peer {self.peer_id}")               
+                return None
+        except Exception as e:
+            self._log(f"Erro ao ler arquivo {arquivo}: {e}")
+            return None
     
     
     def verificar_tracker_periodicamente(self):
@@ -157,13 +164,6 @@ class Peer:
                     self.epoca_registro_arquivos = self.epoca
         except Exception as e:
             self._log(f"Falha no registro de arquivos: {e}")
-
-
-    @Pyro5.api.expose
-    def registrar_arquivo(self, peer_uri, arquivo):
-        if self.is_tracker:
-            self.index_arquivos[arquivo].append(peer_uri)
-            self._log(f"Registrou {arquivo} de {peer_uri}")
             
 
     def enviar_heartbeats(self):
@@ -189,14 +189,6 @@ class Peer:
             except Exception as e:
                 self._log(f"Erro crítico no tracker: {e}")
                 break
-
-
-    @Pyro5.api.expose
-    def receber_heartbeat(self):
-        if self.election_timeout and not self.is_tracker:
-            self._log("Heartbeat recebido")
-            self.election_timeout.cancel()
-            self.iniciar_detector_falhas()
 
 
     def iniciar_detector_falhas(self):
@@ -262,16 +254,6 @@ class Peer:
         self.eleicao_em_curso = False
 
 
-    @Pyro5.api.expose
-    def votar(self, candidato_id, nova_epoca):
-        if not self.peer_votou:
-            self.peer_votou = True
-            self._log(f"Votou em {candidato_id} (época {self.epoca + 1})")
-            return True
-        #self._log(f"Recusou voto para época {self.epoca + 1}")
-        return False
-
-
     def tornar_se_tracker(self):
         self.is_tracker = True
         self.epoca += 1
@@ -294,46 +276,65 @@ class Peer:
             except Exception as e:
                 self._log(f"Erro ao notificar {peer_uri}: {e}")
 
-
-    @Pyro5.api.expose
-    def atualizar_epoca(self, nova_epoca, novo_tracker_uri):
-        if nova_epoca > self.epoca:
-            self.epoca = nova_epoca
-            self.peer_votou = False
-            self.tracker_uri = novo_tracker_uri
-            self._log(f"Atualizou para época {self.epoca}")
-            self.registrar_arquivos_no_tracker()
-            self.iniciar_detector_falhas()
-
-
-    @Pyro5.api.expose
-    def consultar_arquivo(self, nome_arquivo):
-        return self.index_arquivos[nome_arquivo] 
-
-
-    @Pyro5.api.expose
-    def baixar_arquivo(self, arquivo):
+    def _log(self, message):
         try:
-            path = os.path.join(self.FILES_DIR, arquivo)
-            self._log(f"Baixando arquivo {arquivo} de {self.peer_id} do caminho {path} - {os.path.exists(path)}")
-            if os.path.exists(path):
-                with open(path, "rb") as arq:
-                    data = arq.read()
-                    return data
-            else:
-                self._log(f"Arquivo {arquivo} não encontrado no peer {self.peer_id}")               
-                return None
-        except Exception as e:
-            self._log(f"Erro ao ler arquivo {arquivo}: {e}")
-            return None
+            with s.socket(s.AF_INET, s.SOCK_DGRAM) as sock:
+                sock.sendto(f"[Peer {self.peer_id}] {message}".encode(), self.ENDERECO_HOST)
+        except:
+            pass
 
-    #buscar file_3_1.txt
+
+    def criar_arquivos(self):
+        os.makedirs(self.FILES_DIR, exist_ok=True)
+        for i in range(1, 3):
+            path = os.path.join(self.FILES_DIR, f"file_{self.peer_id}_{i}.txt")
+            if not os.path.exists(path):
+                with open(path, "w") as f:
+                    f.write(f"Conteúdo do peer {self.peer_id}, arquivo {i}\n")
+
+
+    def iniciar_servico(self):
+        self.daemon = Pyro5.api.Daemon(host="localhost", port=self.PORT)
+        self.uri = self.daemon.register(self)
+        th.Thread(target=self.daemon.requestLoop, daemon=True).start()
+        print(f"Peer {self.peer_id} iniciado na porta {self.PORT}")
+        
+        t.sleep(1)
+        
+        if self.is_tracker:
+            self.heartbeat_thread = th.Thread(target=self.enviar_heartbeats)
+            self.heartbeat_thread.start()
+
+
+    def registrar_no_sistema(self):
+        try:
+            ns = Pyro5.api.locate_ns()
+            if self.is_tracker:
+                nome_tracker = f"Tracker_Epoca_{self.epoca}"
+                ns.register(nome_tracker, self.uri)
+                self._log(f"Tracker {self.peer_id} eleito para época {self.epoca}")
+                for file in os.listdir(self.FILES_DIR):
+                    self.registrar_arquivo(self.uri, file)
+                t.sleep(2)
+                ns.remove(f"Peer_{self.peer_id}")
+                self.peers_conhecidos = [
+                    uri for nome, uri in ns.list().items()
+                    if nome.startswith("Peer_")
+                ]
+                self.total_peers = len(self.peers_conhecidos)
+            else:
+                ns.register(f"Peer_{self.peer_id}", self.uri)
+                self.atualizar_tracker()
+                
+        except Exception as e:
+            self._log(f"Erro no registro: {e}")
+    
 
     def buscar_e_baixar_arquivo(self, arquivo):
         try:
-            #if not self.tracker_uri:
-            #    self._log("Tracker não disponível para busca")
-            #    return False
+            if not self.tracker_uri:
+                self._log("Tracker não disponível para busca")
+                return False
                 
             with Pyro5.api.Proxy(self.tracker_uri) as tracker:
                 tracker._pyroTimeout = 5
@@ -394,15 +395,8 @@ class Peer:
             elif cmd[0] == "mostrar" and len(cmd) == 1:
                 print(self.index_arquivos)
             elif cmd[0] == "matar":
-                print("Encerrando peer...")
-                if self.is_tracker:
-                    try:
-                        ns = Pyro5.api.locate_ns()
-                        ns.remove(f"Tracker_Epoca_{self.epoca}")
-                    except Exception as e:
-                        pass
-                self.daemon.shutdown()
-                return
+                self.__del__()
+                break
             else:
                 print("Comando inválido!")
 
@@ -416,4 +410,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     peer = Peer(args.id, args.port, args.dir, args.tracker)
+    peer.criar_arquivos()
+    peer.iniciar_servico()
+    peer.registrar_no_sistema()
+    
+    verificador_tracker_thread = th.Thread(target=peer.verificar_tracker_periodicamente, daemon=True)
+    verificador_tracker_thread.start()
+    
     peer.comandos_usuario()
