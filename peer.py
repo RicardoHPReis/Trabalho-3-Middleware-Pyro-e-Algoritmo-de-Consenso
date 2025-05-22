@@ -2,6 +2,7 @@ import Pyro5.api
 import collections as c
 import threading as th
 import argparse as arg
+import base64 as b64
 import random as r
 import socket as s
 import time as t
@@ -13,8 +14,7 @@ class Peer:
         self.peer_id = peer_id
         self.PORT = port
         self.FILES_DIR = files_dir
-        self.LOG_HOST = 'localhost'
-        self.LOG_PORT = 9999
+        self.ENDERECO_HOST = ('localhost', 9999)
         
         self.is_tracker = is_tracker
         
@@ -25,11 +25,11 @@ class Peer:
         self.ELEICAO_TIMEOUT = r.uniform(8.0, 10.0)
         self.VERIFICACAO_TRACKER = 10.0
         self.votos_recebidos = set()
-        self.peer_votou = -False
+        self.peer_votou = False
         self.peers_conhecidos = []
         self.eleicao_em_curso = False
         self.epoca_registro_arquivos = -1
-        self.index_arquivos = c.defaultdict(set)
+        self.index_arquivos = c.defaultdict(list)
         
         self.criar_arquivos()
         self.iniciar_servico()
@@ -42,8 +42,7 @@ class Peer:
     def _log(self, message):
         try:
             with s.socket(s.AF_INET, s.SOCK_DGRAM) as sock:
-                sock.sendto(f"[Peer {self.peer_id}] {message}".encode(), 
-                          (self.LOG_HOST, self.LOG_PORT))
+                sock.sendto(f"[Peer {self.peer_id}] {message}".encode(), self.ENDERECO_HOST)
         except:
             pass
 
@@ -161,10 +160,10 @@ class Peer:
 
 
     @Pyro5.api.expose
-    def registrar_arquivo(self, peer_uri, filename):
+    def registrar_arquivo(self, peer_uri, arquivo):
         if self.is_tracker:
-            self.index_arquivos[filename].add(peer_uri)
-            self._log(f"Registrou {filename} de {peer_uri}")
+            self.index_arquivos[arquivo].append(peer_uri)
+            self._log(f"Registrou {arquivo} de {peer_uri}")
             
 
     def enviar_heartbeats(self):
@@ -308,18 +307,76 @@ class Peer:
 
 
     @Pyro5.api.expose
-    def baixar_arquivo(self, filename):
-        path = os.path.join(self.FILES_DIR, filename)
-        if os.path.exists(path):
-            with open(path, "rb") as f:
-                return f.read() 
-        return None
+    def consultar_arquivo(self, nome_arquivo):
+        return self.index_arquivos[nome_arquivo] 
+
+
+    @Pyro5.api.expose
+    def baixar_arquivo(self, arquivo):
+        try:
+            path = os.path.join(self.FILES_DIR, arquivo)
+            self._log(f"Baixando arquivo {arquivo} de {self.peer_id} do caminho {path} - {os.path.exists(path)}")
+            if os.path.exists(path):
+                with open(path, "rb") as arq:
+                    data = arq.read()
+                    return data
+            else:
+                self._log(f"Arquivo {arquivo} não encontrado no peer {self.peer_id}")               
+                return None
+        except Exception as e:
+            self._log(f"Erro ao ler arquivo {arquivo}: {e}")
+            return None
+
+    #buscar file_3_1.txt
+
+    def buscar_e_baixar_arquivo(self, arquivo):
+        try:
+            #if not self.tracker_uri:
+            #    self._log("Tracker não disponível para busca")
+            #    return False
+                
+            with Pyro5.api.Proxy(self.tracker_uri) as tracker:
+                tracker._pyroTimeout = 5
+                peers = tracker.consultar_arquivo(arquivo)
+                self._log(f"O arquivo {arquivo} está disponível em {len(peers)} peers")
+                if not peers:
+                    self._log(f"Arquivo {arquivo} não encontrado no tracker")
+                    return False
+                for peer_uri in peers:
+                    try:
+                        with Pyro5.api.Proxy(peer_uri) as peer:
+                            self._log(f"Tentando baixar {arquivo} de {peer_uri}")
+                            peer._pyroTimeout = 5
+                            if peer.get_peer_id() == self.peer_id:
+                                self._log(f"Não pode baixar de si mesmo: {peer_uri}")
+                                continue
+                            
+                            dados_b64 = peer.baixar_arquivo(arquivo)
+                            dados = b64.b64decode(dados_b64['data']) if dados_b64 else None 
+                            self._log(f"{isinstance(dados, bytes)} - {dados}")
+                            if dados and isinstance(dados, bytes):
+                                path = os.path.join(self.FILES_DIR, arquivo)
+                                with open(path, "wb") as f:
+                                    f.write(dados)
+                                self._log(f"Arquivo {arquivo} baixado de {peer_uri}")
+                                self.registrar_arquivos_no_tracker()
+                                return True
+                    except Exception as e:
+                        self._log(f"Falha com peer {peer_uri}: {str(e)}")
+                        
+                self._log(f"Todos os peers falharam para {arquivo}")
+                return False
+                
+        except Exception as e:
+            self._log(f"Erro crítico na busca: {str(e)}")
+            return False
 
 
     def comandos_usuario(self):
         print("\nComandos disponíveis:")
         print("buscar <arquivo> - Buscar e baixar arquivo")
         print("add <arquivo>    - Criar novo arquivo local")
+        print("mostrar          - Mostrar arquivos disponíveis")
         print("matar            - Encerrar este peer")
         
         while True:
@@ -328,12 +385,14 @@ class Peer:
                 continue
                 
             if cmd[0] == "buscar" and len(cmd) == 2:
-                self.baixar_arquivo(cmd[1])
+                self.buscar_e_baixar_arquivo(cmd[1])
             elif cmd[0] == "add" and len(cmd) == 2:
                 path = os.path.join(self.FILES_DIR, cmd[1])
                 with open(path, "w") as f:
                     f.write(f"Novo arquivo {cmd[1]} do peer {self.peer_id}\n")
                 print(f"Arquivo {cmd[1]} criado!")
+            elif cmd[0] == "mostrar" and len(cmd) == 1:
+                print(self.index_arquivos)
             elif cmd[0] == "matar":
                 print("Encerrando peer...")
                 if self.is_tracker:
