@@ -10,7 +10,7 @@ import socket as s
 import time as t
 import os
 
-@Pyro5.api.expose
+
 class Peer:
     def __init__(self, peer_id, port, files_dir, is_tracker=False):
         self.peer_id = peer_id
