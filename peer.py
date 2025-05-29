@@ -1,3 +1,5 @@
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 import Pyro5.api
 import collections as c
 import threading as th
@@ -31,6 +33,12 @@ class Peer:
         self.eleicao_em_curso = False
         self.epoca_registro_arquivos = -1
 
+        #monitoramento de arquivos
+        self.observer = Observer()
+        self.event_handler = self.FileChangeHandler(self)
+        self.observer.schedule(self.event_handler, self.FILES_DIR, recursive=False)
+        self.observer.start()
+
 
     def __del__(self):
         print("Encerrando peer...")
@@ -41,6 +49,24 @@ class Peer:
             except Exception as e:
                 pass
         self.daemon.shutdown()
+        self.observer.stop()
+    
+    
+    class FileChangeHandler(FileSystemEventHandler):
+        def __init__(self, peer):
+            super().__init__()
+            self.peer = peer
+
+        def on_created(self, event):
+            if not event.is_directory:
+                arquivo = os.path.basename(event.src_path)
+                self.peer.registrar_arquivo_local(arquivo)
+
+        def on_deleted(self, event):
+            if not event.is_directory:
+                arquivo = os.path.basename(event.src_path)
+                self.peer.remover_arquivo_local(arquivo)
+
 
     @Pyro5.api.expose
     def get_peer_id(self):
@@ -58,17 +84,36 @@ class Peer:
             self.index_arquivos[arquivo].append(peer_uri)
             self._log(f"Registrou {arquivo} de {peer_uri}")
     
-            
-    @Pyro5.api.expose
-    def receber_heartbeat(self):
-        if self.election_timeout and not self.is_tracker:
-            self._log("Heartbeat recebido")
-            self.election_timeout.cancel()
-            self.iniciar_detector_falhas()
     
-            
     @Pyro5.api.expose
-    def votar(self, candidato_id, nova_epoca):
+    def remover_arquivo(self, peer_uri, arquivo):
+        if self.is_tracker:
+            if arquivo in self.index_arquivos:
+                if peer_uri in self.index_arquivos[arquivo]:
+                    self.index_arquivos[arquivo].remove(peer_uri)
+                    self._log(f"Removeu {arquivo} de {peer_uri}")
+                    if not self.index_arquivos[arquivo]:
+                        del self.index_arquivos[arquivo]
+        return True
+
+
+    @Pyro5.api.expose
+    def receber_heartbeat(self, epoca_tracker, tracker_uri):
+        if not self.is_tracker:
+            if epoca_tracker > self.epoca:
+                self._log(f"Novo heartbeat da época {epoca_tracker} (atual: {self.epoca})")
+                self.epoca = epoca_tracker
+                self.tracker_uri = tracker_uri
+                self.peer_votou = False
+                self.registrar_arquivos_no_tracker()
+                
+            if self.election_timeout:
+                self.election_timeout.cancel()
+                self.iniciar_detector_falhas()
+    
+    
+    @Pyro5.api.expose
+    def votar(self, candidato_id):
         if not self.peer_votou:
             self.peer_votou = True
             self._log(f"Votou em {candidato_id} (época {self.epoca + 1})")
@@ -81,12 +126,11 @@ class Peer:
     def atualizar_epoca(self, nova_epoca, novo_tracker_uri):
         if nova_epoca > self.epoca:
             self.epoca = nova_epoca
-            self.peer_votou = False
             self.tracker_uri = novo_tracker_uri
+            self.peer_votou = False  
             self._log(f"Atualizou para época {self.epoca}")
             self.registrar_arquivos_no_tracker()
-            self.iniciar_detector_falhas()
-
+            self.iniciar_detector_falhas()  
 
     @Pyro5.api.expose
     def consultar_arquivo(self, nome_arquivo):
@@ -151,6 +195,27 @@ class Peer:
             self.iniciar_eleicao()        
 
 
+    def registrar_arquivo_local(self, arquivo):
+        try:
+            if self.tracker_uri:
+                with Pyro5.api.Proxy(self.tracker_uri) as tracker:
+                    tracker.registrar_arquivo(self.uri, arquivo)
+                    self._log(f"Arquivo adicionado: {arquivo} (registrado no tracker)")
+        except Exception as e:
+            self._log(f"Falha ao registrar {arquivo}: {e}")
+
+    
+    def remover_arquivo_local(self, arquivo):
+        try:
+            if self.tracker_uri:
+                with Pyro5.api.Proxy(self.tracker_uri) as tracker:
+                    tracker.remover_arquivo(self.uri, arquivo)
+                    self._log(f"Arquivo removido: {arquivo} (excluído do tracker)")
+            return True
+        except Exception as e:
+            self._log(f"Falha ao remover {arquivo}: {e}")
+
+
     def registrar_arquivos_no_tracker(self):
         try: 
             if not self.tracker_uri:
@@ -179,7 +244,7 @@ class Peer:
                         peer_uri = ns.lookup(nome_peer)
                         with Pyro5.api.Proxy(peer_uri) as peer:
                             peer._pyroTimeout = 3
-                            peer.receber_heartbeat()
+                            peer.receber_heartbeat(self.epoca, self.uri) 
                     except Pyro5.errors.CommunicationError as e:
                         self._log(f"Falha no heartbeat para {nome_peer}: {e}")
                         ns.remove(nome_peer)
@@ -239,7 +304,7 @@ class Peer:
             try:
                 with Pyro5.api.Proxy(peer_uri) as peer:
                     peer._pyroTimeout = 3
-                    if peer.votar(self.peer_id, self.epoca + 1):
+                    if peer.votar(self.peer_id):
                         self.votos_recebidos.add(peer.get_peer_id())
             except Exception as e:
                 self._log(f"Erro ao contactar {peer_uri}: {e}")
@@ -264,17 +329,7 @@ class Peer:
             self.heartbeat_thread.start()
         
         self._log(f"Eleito como novo tracker (época {self.epoca})")
-        self.notificar_novo_tracker()
-
-
-    def notificar_novo_tracker(self):
-        for peer_uri in self.peers_conhecidos:
-            try:
-                with Pyro5.api.Proxy(peer_uri) as peer:
-                    peer._pyroTimeout = 3
-                    peer.atualizar_epoca(self.epoca, self.uri)
-            except Exception as e:
-                self._log(f"Erro ao notificar {peer_uri}: {e}")
+    
 
     def _log(self, message):
         try:
